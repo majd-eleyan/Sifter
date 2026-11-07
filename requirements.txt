@@ -1,0 +1,10 @@
+pymupdf
+psycopg[binary]
+sentence-transformers
+langchain-text-splitters
+openai
+streamlit>=1.50
+pandas
+python-dotenv
+google-api-python-client
+google-auth
