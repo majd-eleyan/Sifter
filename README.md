@@ -1,12 +1,13 @@
 # ✦ Sifter
 
+🟢 Live Dimo : [Try now](https://sifter-cv-rag.streamlit.app/)
+
 **AI-powered CV screening with Retrieval-Augmented Generation (RAG), PostgreSQL + pgvector, and Gemini.**
 
 Ask a question or paste a job description, and Sifter shortlists the best-matching candidates from your CV pool, then reads their **full CVs** to give a grounded answer, with the source file for every claim.
 
 > The 15 sample CVs in `data/` are **synthetic** (generated for training and demo purposes). They contain no real people.
 
-<!-- Add a screenshot or GIF here, e.g.:  ![Sifter](docs/screenshot.png) -->
 [![image.png](https://i.postimg.cc/HkfsP44Z/image.png)](https://postimg.cc/3kFTkGqm)
 
 [![image.png](https://i.postimg.cc/X7qjjDsz/image.png)](https://postimg.cc/HVGD33Dw)
