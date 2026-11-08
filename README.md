@@ -71,8 +71,6 @@ Sifter/
 ├── db.py, config.py  connection and settings
 ├── schema.sql        database schema
 ├── setup_db.py       creates the tables
-├── check_db.py       checks the database connection
-├── check_llm.py      checks the Gemini connection and lists available models
 ├── eval/             16 test cases + evaluation runner
 ├── data/             15 synthetic sample CVs
 └── .streamlit/       UI theme
@@ -184,14 +182,6 @@ python eval/run_eval.py --compare
 - Reports are written to `eval/report_<prompt>.md` and `eval/results_<prompt>.json`.
 
 The ground truth was computed from the sample CVs and should be verified manually before you rely on it.
-
-## Security and privacy
-
-- Secrets live in `.env` / Secrets only and are excluded by `.gitignore`.
-- Contact details are redacted before indexing and before text is sent to the LLM.
-- The database is queried with parameterized SQL, and CV text is HTML-escaped in the UI.
-- Set `APP_PASSWORD` for any public deployment, since the UI can upload and delete CVs.
-- Full CV text is sent to the Gemini API. With real candidate data you need consent and a privacy policy.
 
 ## Limitations
 
