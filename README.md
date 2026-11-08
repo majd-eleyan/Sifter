@@ -1,188 +1,200 @@
-# ✦ Sifter — نظام RAG للـ CVs (PostgreSQL + pgvector)
+# ✦ Sifter
 
-نظام بيدور على أنسب المرشحين من الـ CVs، ، وبيضيف أي CV جديد أوتوماتيك (من مجلد أو من Google Drive).
+**AI-powered CV screening with Retrieval-Augmented Generation (RAG), PostgreSQL + pgvector, and Gemini.**
 
-## 1) كيف بيشتغل
+Ask a question or paste a job description, and Sifter shortlists the best-matching candidates from your CV pool, then reads their **full CVs** to give a grounded answer, with the source file for every claim.
+
+> The 15 sample CVs in `data/` are **synthetic** (generated for training and demo purposes). They contain no real people.
+
+<!-- Add a screenshot or GIF here, e.g.:  ![Sifter](docs/screenshot.png) -->
+[![image.png](https://i.postimg.cc/HkfsP44Z/image.png)](https://postimg.cc/3kFTkGqm)
+
+[![image.png](https://i.postimg.cc/X7qjjDsz/image.png)](https://postimg.cc/HVGD33Dw)
+---
+
+## Features
+
+- **Two-stage retrieval.** Semantic search finds the top-K matching chunks, groups them by CV, and shortlists the top-N candidates. The **complete CVs** of those candidates are then sent to the LLM, so nothing important is lost to chunk boundaries.
+- **ATS template check + human review.** CVs that follow the template are indexed automatically. Others are held in a review queue (approve / edit / reject) and stay invisible to search until approved.
+- **Automatic metadata extraction.** Candidate name, job title, department, years of experience, and skills, used for SQL filters (for example: Cybersecurity, 5+ years).
+- **Privacy by design.** Emails and phone numbers are redacted before chunking and before any text reaches the LLM. The system prompt also refuses to reveal contact details or to filter by protected traits (gender, age, religion, nationality).
+- **Follow-up questions** about the same shortlisted candidates, without a new search.
+- **Google Drive sync.** New PDFs dropped into a Drive folder are ingested automatically.
+- **Tracing and evaluation.** Every question is logged (retrieved chunks, CVs sent, answer, latency, tokens). A 16-case evaluation suite (Normal / Edge / Failure / Risky) with ground truth, an LLM judge, and prompt A/B comparison is included.
+- **Streamlit UI** in black and gold.
+
+## How it works
 
 ```
-CV (PDF) ─► فحص ATS ─┬─ ملتزم ──────► metadata ─► chunks ─► embeddings ─► Postgres (ready)
-                     └─ مش ملتزم ───► Human review (موافقة/رفض) ─► نفس الخطوات بعد الموافقة
+CV (PDF) ─► ATS check ─┬─ passes ───► metadata ─► section chunks ─► embeddings ─► PostgreSQL (ready)
+                       └─ fails ────► human review ─► approve ─► same steps
 
-سؤال ─► embedding ─► أقرب K chunk (SQL) ─► نعرف من أي CVs ─► أفضل N مرشح
-      ─► نبعت الـ CV الكامل لكل مرشح للـ LLM ─► الجواب (+ Trace بجدول rag_traces)
+Question ─► embedding ─► top-K chunks (SQL, cosine distance) ─► group by CV ─► top-N candidates
+         ─► full CVs (contacts redacted) ─► Gemini ─► answer + sources ─► trace saved
 ```
 
-**ليش نبعت الـ CV كامل مش بس الـ chunks؟** الـ chunks بتستخدم للتصفية (مين أقرب للسؤال). بعدين الـ LLM بياخد الـ CV كامل للمرشحين المختارين، فبيقدر يحسب سنوات الخبرة ويقارن المهارات بدون ما يفوته شي.
+**Database design**
 
-## 2) الملفات
+| Table | Purpose |
+|---|---|
+| `documents` | One row per CV: file name, candidate name, department, years of experience, skills, full text, ATS result, status (`ready` / `pending_review` / `rejected`), optional Drive file ID |
+| `document_chunks` | CV sections with their `VECTOR(384)` embedding and JSONB metadata. Linked to `documents` with `ON DELETE CASCADE`; HNSW index for fast search |
+| `rag_traces` | One row per question, used for tracing and evaluation |
 
+## Tech stack
 
-| الملف           | شو بيعمل                                                                                                                                                                |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `schema.sql`         | تصميم الداتابيز:`documents` و`document_chunks` و`rag_traces`                                                                                                   |
-| `setup_db.py`        | بينفذ`schema.sql` (بدل pgAdmin)                                                                                                                                        |
-| `config.py` / `.env` | كل الإعدادات (الداتابيز، التوكن، K و N، Drive)                                                                                                   |
-| `db.py`              | الاتصال بالداتابيز (`get_conn()`)                                                                                                                             |
-| `cv_parser.py`       | قراءة PDF، تقسيم الأقسام، فحص**ATS**، استخراج **metadata**، إخفاء الإيميل والهاتف                                            |
-| `chunking.py`        | طرق التقطيع:`section` (الافتراضي) و`recursive` و`fixed`                                                                                                   |
-| `embedding.py`       | النص ← vector (384 رقم)                                                                                                                                                |
-| `ingest.py`          | الخط الكامل للإدخال + الموافقة/الرفض (HITL)                                                                                                      |
-| `search.py`          | البحث بـ SQL (`<=>`) واختيار المرشحين وجلب الـ CV الكامل                                                                                    |
-| `prompts.py`         | الـ System Prompt المستخدم بالنظام (`SYSTEM_PROMPT`)، ونسخة بسيطة (`BASELINE_PROMPT`) بنستخدمها فقط بالتقييم للمقارنة |
-| `llm.py`             | الاتصال بـ Google Gemini (مع إعادة المحاولة عند ضغط السيرفر)                                                                              |
-| `rag.py`             | `ask()` بتجمع كل شي وبتسجل الـ Trace                                                                                                                         |
-| `drive_sync.py`      | مراقبة مجلد Google Drive                                                                                                                                             |
-| `app.py`             | الواجهة (Streamlit)                                                                                                                                                     |
-| `eval/`              | الـ 16 حالة اختبار + سكربت التقييم                                                                                                                    |
-| `data/`              | الـ 15 CV                                                                                                                                                                   |
+| Area | Technology |
+|---|---|
+| UI | Streamlit |
+| Database | PostgreSQL + pgvector |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, runs locally) |
+| LLM | Google Gemini through its OpenAI-compatible endpoint |
+| PDF parsing | PyMuPDF |
+| DB driver | psycopg 3 |
+| Drive integration | Google Drive API (service account, read-only) |
 
-## 3) المتطلبات
+## Project structure
 
-- Python 3.10 أو أحدث
-- Docker Desktop (للداتابيز بس)
-- **مساحة فاضية على القرص 6 GB على الأقل** (مكتبة torch والـ embedding model بياخدوا مساحة)
-- مفتاح Gemini API (من Google AI Studio)
+```
+Sifter/
+├── app.py            Streamlit UI (Search, CVs, Review)
+├── rag.py            ask(): retrieval → LLM → answer + trace
+├── search.py         SQL vector search, candidate shortlist, full-CV fetch
+├── ingest.py         PDF → ATS check → metadata → chunks → embeddings → DB, plus approve/reject
+├── cv_parser.py      PDF reading, sections, ATS check, metadata, redaction
+├── chunking.py       section / recursive / fixed chunking
+├── embedding.py      text → vector
+├── llm.py            Gemini client with retries
+├── prompts.py        system prompt (+ a baseline prompt for A/B tests)
+├── drive_sync.py     Google Drive watcher
+├── db.py, config.py  connection and settings
+├── schema.sql        database schema
+├── setup_db.py       creates the tables
+├── check_db.py       checks the database connection
+├── check_llm.py      checks the Gemini connection and lists available models
+├── eval/             16 test cases + evaluation runner
+├── data/             15 synthetic sample CVs
+└── .streamlit/       UI theme
+```
 
-## 4) التشغيل خطوة خطوة (VS Code)
+## Quick start (local)
 
-كل الأوامر بتنكتب بـ Terminal جوا VS Code (`Ctrl + ~`) ومن **مجلد المشروع**.
+**Requirements:** Python 3.10+, Docker, and a [Gemini API key](https://aistudio.google.com/). Allow about 6 GB of free disk space (PyTorch and the embedding model).
 
-**1) افتح المجلد:** File ← Open Folder ← اختر `rag_cv_project`.
+**1. Start PostgreSQL with pgvector**
 
-**2) أنشئ بيئة Python وفعّلها:**
+```bash
+docker run -d --name rag-postgres \
+  -e POSTGRES_USER=raguser -e POSTGRES_PASSWORD=ragpass -e POSTGRES_DB=ragdb \
+  -p 5433:5432 -v rag_postgres_data:/var/lib/postgresql \
+  pgvector/pgvector:pg18
+```
 
-```powershell
+**2. Install**
+
+```bash
+git clone https://github.com/majd-eleyan/Sifter.git
+cd Sifter
 python -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-لو ويندوز منع التفعيل: `Set-ExecutionPolicy -Scope Process Bypass` ثم أعد الأمر. وبعدها اختر الـ interpreter: `Ctrl+Shift+P` ← `Python: Select Interpreter` ← اللي جواه `.venv`.
-
-**3) ثبّت المكتبات:**
-
-```powershell
+# Windows PowerShell:  .venv\Scripts\Activate.ps1
+# macOS / Linux:       source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**4) ملف الإعدادات:**
+**3. Configure**
 
-```powershell
-copy .env.example .env
+```bash
+cp .env.example .env        # Windows: copy .env.example .env
 ```
 
-افتح `.env` وحط التوكن بدل `hf_ضع_التوكن_هنا`. الباقي جاهز ومطابق لأمر Docker اللي شغلناه.
+Open `.env` and set `GEMINI_API_KEY`. Check the model name with `python check_llm.py`, which lists the models available to your key; set `GEMINI_MODEL` if needed.
 
-**5) شغّل الداتابيز:** افتح Docker Desktop، وبعدين:
+**4. Create the tables and load the sample CVs**
 
-```powershell
-docker start rag-postgres
-docker ps
-```
-
-لازم تشوف `rag-postgres` و`Up`. (إذا ما كانت موجودة أصلاً، شغّل أمر `docker run` اللي عندك من قبل.)
-
-**6) أنشئ الجداول:**
-
-```powershell
-python setup_db.py --reset
-```
-
-> ⚠️ `--reset` بيحذف الجداول القديمة وبينشئها من جديد. لازم تعمله **مرة وحدة** لأنه تصميم جدول `documents` تغيّر (أعمدة جديدة)، وبيمسح البيانات التجريبية القديمة. المرات الجاية: `python setup_db.py` بدون `--reset`.
-
-**7) أدخل الـ CVs:**
-
-```powershell
+```bash
+python setup_db.py
 python ingest.py
+python check_db.py          # optional: confirms the connection and shows row counts
 ```
 
-أول مرة بينزل موديل الـ embedding (حوالي 90 MB)، فاستنى. النتيجة المتوقعة: 15 CV `added` وكل واحد 7 chunks. أي CV مش ملتزم بـ ATS بيطلع `sent to human review`.
+The first run downloads the embedding model (about 90 MB, once).
 
-**8) شغّل الواجهة:**
+**5. Run**
 
-```powershell
+```bash
 streamlit run app.py
 ```
 
-بيفتح `http://localhost:8501`. جرّب: *"Who has Python skills and at least 3 years of experience?"*
+Open http://localhost:8501 and try: *Who has Python skills and at least 3 years of experience?*
 
-## 5) شو لازم تعدل عندك؟
+## Configuration
 
+Settings come from environment variables (a `.env` file locally, or Secrets when deployed).
 
-| شو                                                            | الحل                                                                                                                                                                               |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| الجداول القديمة (`documents` و`document_chunks`) | `python setup_db.py --reset` (مرة وحدة)                                                                                                                                         |
-| اسم الداتابيز بـ`main.ipynb` (`pdf_db`)           | ما بنحتاج الـ notebook للتشغيل. إذا استخدمته، غيّر الاسم لـ`ragdb`                                                                            |
-| مفتاح LlamaCloud                                           | مش مستخدم بالمشروع (pymupdf كفاية لأنه قالب ATS ثابت). إذا استخدمته بالـ notebook، حطه بمتغير بيئة، ومش بالكود |
-| المنفذ أو كلمة السر                             | عدّل`.env` ليطابق أمر `docker run`                                                                                                                                        |
-| عدد الـ CVs المبعوتة للموديل (N)           | من تبويب Search ثم Filters (**CVs to compare**)، أو `TOP_N` بـ `.env`. وعدد الـ chunks (K) بيتحسب تلقائياً (3 أضعاف N على الأقل)       |
-| طريقة الـ chunking                                      | `CHUNK_STRATEGY=section` أو `recursive` أو `fixed` بـ `.env` ثم `python setup_db.py --reset` و`python ingest.py`                                                              |
+| Variable | Default | Description |
+|---|---|---|
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `localhost`, `5433`, `ragdb`, `raguser`, `ragpass` | Local database settings |
+| `DATABASE_URL` | empty | Full connection string (Neon, Supabase). Overrides the `DB_*` values |
+| `GEMINI_API_KEY` | empty | **Required** |
+| `GEMINI_MODEL` | `gemini-flash-latest` | Model name. Model names change over time, so verify with `check_llm.py` |
+| `TOP_K` / `TOP_N` | `10` / `5` | Chunks retrieved / full CVs sent to the LLM |
+| `CHUNK_STRATEGY` | `section` | `section`, `recursive`, or `fixed` |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Must output 384 dimensions (or change `VECTOR(384)` in `schema.sql`) |
+| `APP_PASSWORD` | empty | If set, the UI asks for this password. Recommended for public deployments |
+| `DRIVE_FOLDER_ID`, `GOOGLE_SERVICE_ACCOUNT_FILE` or `GOOGLE_SERVICE_ACCOUNT_JSON` | empty | Google Drive sync |
+| `PRICE_IN_PER_1M`, `PRICE_OUT_PER_1M` | `0` | Token prices (USD per million) used to estimate cost in traces |
 
-## 6) شغل الـ SQL بـ VS Code (بدون pgAdmin)
+## CV template and file naming
 
-**الطريقة 1: من الـ Terminal مباشرة:**
-
-```powershell
-docker exec -it rag-postgres psql -U raguser -d ragdb
-```
-
-وجوا `psql`:
-
-```sql
-\dt
-SELECT id, candidate_name, department, years_experience, status FROM documents;
-SELECT section, COUNT(*) FROM document_chunks GROUP BY section;
-SELECT d.candidate_name, c.section, LEFT(c.content, 60) FROM document_chunks c JOIN documents d ON d.id = c.document_id LIMIT 5;
-\q
-```
-
-**الطريقة 2: بواجهة:** ثبّت إضافة **SQLTools** و**SQLTools PostgreSQL/Cockroach Driver**، وأضف اتصال: host `localhost` و port `5433` و database `ragdb` و user `raguser` و password `ragpass`. بعدين افتح أي ملف `.sql` ونفّذ الاستعلام المحدد.
-
-## 7) فحص ATS والمراجعة البشرية (HITL)
-
-**القالب المطلوب:** PDF نصي (مش صورة ممسوحة) فيه هالعناوين، كل واحد بسطر لحاله:
+A CV is added automatically when it is a **text PDF** (not a scan) with an email address and these six headings, each on its own line:
 
 ```
-PROFESSIONAL SUMMARY / CORE SKILLS / EXPERIENCE / EDUCATION / SELECTED PROJECTS / CERTIFICATIONS
+PROFESSIONAL SUMMARY · CORE SKILLS · EXPERIENCE · EDUCATION · SELECTED PROJECTS · CERTIFICATIONS
 ```
 
-وفيه إيميل. ملف الـ CV الـ16 اللي كان بمجلد `data` (له عناوين مختلفة) هو مثال على CV بيروح للمراجعة.
+The department is read from the file name:
 
-**اللي بيصير:**
+```
+NN_Department_FirstName_LastName.pdf      e.g.  01_Data_and_AI_Omar_Khalil.pdf
+```
 
-- ملتزم ← `status = ready` ← بيدخل البحث فوراً.
-- مش ملتزم ← `status = pending_review` ← ما بيدخل البحث. بتروح لتبويب **Human review**، بتشوف سبب الرفض، وبتعدل الاسم والقسم والخبرة، وبعدين **Approve** (بيصير له chunks وembeddings) أو **Reject**.
+Known departments: Data and AI, Software Engineering, Cybersecurity, Digital Marketing, Finance and Accounting. If the name does not follow the rule, the department is guessed from the job title. CVs that fail the check go to the **Review** tab.
 
-**الـ metadata المستخرجة:** الاسم، المسمى، القسم، سنوات الخبرة، المهارات، اسم الملف، و`drive_file_id`.
+## Google Drive sync
 
-**قاعدة تسمية الملفات** (لاستخراج القسم): `NN_Department_First_Last.pdf` مثل `01_Data_and_AI_Omar_Khalil.pdf`. إذا الاسم ما التزم، القسم بيتخمّن من المسمى الوظيفي.
+1. In Google Cloud Console, enable the **Google Drive API** and create a **Service Account**; download its JSON key as `credentials.json`.
+2. Share your Drive folder with the service account's email (Viewer).
+3. Set `DRIVE_FOLDER_ID` in `.env`.
+4. Run `python drive_sync.py --once` to test, or `python drive_sync.py` to watch the folder (checks every `DRIVE_POLL_SECONDS`).
 
-## 8) ربط Google Drive
+Only PDF files directly inside the folder are read. File names must be unique.
 
-الفكرة: برنامج صغير (`drive_sync.py`) بيفحص المجلد كل دقيقة، وأي PDF جديد بيحمله ويدخله.
+## Evaluation
 
-1. افتح console.cloud.google.com وأنشئ Project.
-2. **APIs & Services ← Library** وفعّل **Google Drive API**.
-3. **IAM & Admin ← Service Accounts ← Create**.
-4. افتح الـ Service Account ← **Keys ← Add key ← JSON**. بينزل ملف، سمّيه `credentials.json` وحطه بمجلد المشروع.
-5. انسخ إيميل الـ Service Account (شكله `xxx@yyy.iam.gserviceaccount.com`).
-6. بمجلد الـ Drive: **Share** وأضف هالإيميل بصلاحية **Viewer**.
-7. رقم المجلد هو الجزء اللي بعد `/folders/` بالرابط. حطه بـ `.env`: `DRIVE_FOLDER_ID=...`
-8. جرّب: `python drive_sync.py --once`
-9. للتشغيل الدائم، افتح Terminal ثاني: `python drive_sync.py` (خليه شغال).
-
-أي CV بتضيفه للمجلد بيظهر بالنظام خلال `DRIVE_POLL_SECONDS` (60 ثانية). الملفات لازم تكون PDF، ولازم أسماؤها مختلفة. وزر **Sync Google Drive** بتبويب CVs (بيظهر فقط لما يكون الـ Drive مضبوط) بيعمل نفس الشي بالضغط.
-
-## 9) التقييم (Session 25)
-
-```powershell
-python eval/run_eval.py --prompt baseline
-python eval/run_eval.py --prompt best
+```bash
+python eval/run_eval.py --prompt baseline   # simple prompt (for comparison only)
+python eval/run_eval.py --prompt best       # the prompt the app uses
 python eval/run_eval.py --compare
 ```
 
-- **16 حالة** بـ `eval/test_cases.json`: 4 Normal و4 Edge و4 Failure و4 Risky، لكل حالة Ground Truth أو سلوك متوقع.
-- **Ground Truth** للحالات العادية انحسب من نص الـ 15 CV، لكن **تحقق منه بنفسك** قبل التسليم (مثلاً Lina Hassan عندها "Python Basics" فقط، وحطيناها حالة حدّية).
-- **Tracing:** كل تشغيل بيتسجل بجدول `rag_traces` (الـ chunks، الـ CVs المبعوتة، الجواب، الزمن، الـ tokens). والتقرير بيحدد مكان المشكلة: **Retrieval** أو **Generation**.
-- **المقاييس:** Retrieval recall وprecision، Completeness، Safety (تسريب إيميل أو هاتف)، Cost، Latency، وحكم الـ LLM Judge.
-- **A/B:** `baseline` (prompt بسيط) مقابل `best` (المستخدم بالنظام) بنفس الأسئلة، والتقارير بـ `eval/report_baseline.md` و`eval/report_best.md`. لو ما بدك المقارنة، تجاهل `BASELINE_PROMPT`، ما بيأثر على النظام.
-- لحساب التكلفة بالدولار، حط أسعار الموديل بـ `.env` (`PRICE_IN_PER_1M` و`PRICE_OUT_PER_1M`). بدونها بيظهر عدد الـ tokens فقط.
+- **16 cases:** 4 Normal, 4 Edge, 4 Failure, 4 Risky (`eval/test_cases.json`), each with a ground-truth answer or expected behavior.
+- **Metrics:** retrieval recall and precision, completeness, safety (contact-detail leaks), latency, tokens/cost, and an LLM-judge verdict.
+- **Tracing:** each run is stored in `rag_traces`, and the report states where a failure started (retrieval or generation).
+- Reports are written to `eval/report_<prompt>.md` and `eval/results_<prompt>.json`.
+
+The ground truth was computed from the sample CVs and should be verified manually before you rely on it.
+
+## Security and privacy
+
+- Secrets live in `.env` / Secrets only and are excluded by `.gitignore`.
+- Contact details are redacted before indexing and before text is sent to the LLM.
+- The database is queried with parameterized SQL, and CV text is HTML-escaped in the UI.
+- Set `APP_PASSWORD` for any public deployment, since the UI can upload and delete CVs.
+- Full CV text is sent to the Gemini API. With real candidate data you need consent and a privacy policy.
+
+## Limitations
+
+- The default embedding model is English-only, so questions in other languages retrieve less accurately. A multilingual 384-dimension model (`paraphrase-multilingual-MiniLM-L12-v2`) is a drop-in replacement; re-ingest after changing it.
+- Only `TOP_N` CVs reach the LLM. If more candidates qualify, some are not seen; raise `TOP_N` when needed.
+- Years of experience come from the CV summary (falling back to the dates), so they can differ from a manual count.
+- The ATS check validates structure, not content quality. Scanned PDFs are not OCR'd.
